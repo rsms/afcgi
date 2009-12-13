@@ -12,6 +12,8 @@ This paves the way for long-lived connections in web apps without wasting resour
 
 - `servers/` contains a set of asynchronous FastCGI server implementations, most notably the original libevent-based server written with the purpose to test afcgi.
 
+[<img src="http://hunch.se/s/cx/e1rg8i8bkgwks.png" width="500">](http://hunch.se/s/cx/e1rg8i8bkgwks.png)
+
 ## Building
 
 ### Nginx module
