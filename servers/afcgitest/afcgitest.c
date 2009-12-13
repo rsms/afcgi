@@ -19,6 +19,12 @@
 
 #include <event.h>
 
+#define DEBUG_RESPONSE_DELAY 5
+
+#ifndef DEBUG_RESPONSE_DELAY
+#define DEBUG_RESPONSE_DELAY 0
+#endif
+
 #define AZ(foo) assert((foo) == 0)
 #define AN(foo) assert((foo) != 0)
 
@@ -67,7 +73,7 @@ enum {
 
 enum {
 	PROTOST_REQUEST_COMPLETE = 0,
-	PROTOST_CANT_MPX_CONN		= 1,
+	PROTOST_CANT_MPX_CONN		 = 1,
 	PROTOST_OVERLOADED			 = 2,
 	PROTOST_UNKNOWN_ROLE		 = 3
 };
@@ -195,6 +201,10 @@ inline static int bev_add(struct event *ev, int timeout) {
 
 /////////// request
 
+void app_handle_beginrequest(request_t *r);
+void app_handle_input(request_t *r, uint16_t length);
+void app_handle_requestaborted(request_t *r);
+
 
 // get a request by request id
 inline static request_t *request_get(uint16_t id) {
@@ -215,10 +225,19 @@ inline static void request_put(request_t *r) {
 	r->bev = NULL;
 }
 
+static inline bool request_is_active(request_t *r) {
+	return ((r != NULL) && (r->bev != NULL));
+}
+
 
 void request_write(request_t *r, const char *buf, uint16_t len, uint8_t tostdout) {
-	if(len == 0)
+	if (len == 0)
 		return;
+	
+	if (!request_is_active(r)) {
+		//warn("request_write(): request is not active");
+		return;
+	}
 	
 	header_t h;
 	header_init(&h, tostdout ? TYPE_STDOUT : TYPE_STDERR, r->id, len);
@@ -233,6 +252,11 @@ void request_write(request_t *r, const char *buf, uint16_t len, uint8_t tostdout
 
 
 void request_end(request_t *r, uint32_t appstatus, uint8_t protostatus) {
+	if (!request_is_active(r)) {
+		//warn("request_end(): request is not active");
+		return;
+	}
+	
 	uint8_t buf[32]; // header + header + end_request_t
 	uint8_t *p = buf;
 	
@@ -254,14 +278,22 @@ void request_end(request_t *r, uint32_t appstatus, uint8_t protostatus) {
 }
 
 
-void app_handle_beginrequest(request_t *r);
-void app_handle_input(request_t *r, uint16_t length);
-void app_handle_requestaborted(request_t *r);
+inline static void process_abort_request(request_t *r) {
+	assert(r->bev != NULL);
+	printf("request %p aborted by client\n", r);
+	
+	app_handle_requestaborted(r);
+	
+	r->terminate = 1; // can we trust fcgiproto_writecb to be called?
+}
 
 
 void fcgiproto_errorcb(struct bufferevent *bev, short what, request_t *r) {
-	if (what & EVBUFFER_EOF)
+	if (what & EVBUFFER_EOF) {
 		printf("request %p EOF\n", r);
+		// we treat abrupt disconnect as abort
+		process_abort_request(r);
+	}
 	else if (what & EVBUFFER_TIMEOUT)
 		printf("request %p timeout\n", r);
 	else
@@ -287,10 +319,10 @@ inline static void process_begin_request(struct bufferevent *bev, uint16_t id, c
 	
 	r = request_get(id);
 	//assert(r->bev == NULL);
-	if (r->bev != NULL) {
+	if ((r->bev != NULL) && (EVBUFFER_LENGTH(r->bev->input) != 0)) {
 		printf("warn: client sent already used req id %d -- skipping", id);
 		// todo: respond with error
-		evbuffer_drain(bev->input, EVBUFFER_LENGTH(bev->input));
+		bev_close(r->bev);
 		return;
 	}
 	
@@ -304,21 +336,6 @@ inline static void process_begin_request(struct bufferevent *bev, uint16_t id, c
 	bev->cbarg = (void *)r;
 	
 	evbuffer_drain(bev->input, sizeof(header_t)+sizeof(begin_request_t));
-}
-
-
-inline static void process_abort_request(struct bufferevent *bev, uint16_t id) {
-	request_t *r;
-	
-	r = request_get(id);
-	assert(r->bev != NULL);
-	
-	bev_drain(bev);
-	bev_disable(bev);
-	
-	app_handle_requestaborted(r);
-	
-	request_put(r);
 }
 
 
@@ -433,7 +450,7 @@ void fcgiproto_readcb(struct bufferevent *bev, request_t *r) {
 					(const begin_request_t *)(EVBUFFER_DATA(bev->input) + sizeof(header_t)) );
 				break;
 			case TYPE_ABORT_REQUEST:
-				process_abort_request(bev, msg_id);
+				process_abort_request(request_get(msg_id));
 				break;
 			case TYPE_PARAMS:
 				process_params(bev, msg_id, (const uint8_t *)EVBUFFER_DATA(bev->input) + sizeof(header_t), msg_len);
@@ -465,11 +482,11 @@ void fcgiproto_writecb(struct bufferevent *bev, request_t *r) {
 	if (r != NULL && r->terminate) {
 		bev_disable(r->bev);
 		bev_drain(r->bev);
+		bev_close(r->bev);
+		request_put(r);
 		if (r->keepconn == false) {
 			printf("PUT connection (r->keepconn == false, in fcgiproto_writecb)\n");
-			bev_close(r->bev);
 		}
-		request_put(r);
 	}
 }
 
@@ -557,19 +574,13 @@ void fcgiev_init() {
 
 static void app_test_delayed_finalize_request(int fd, short event, void *arg) {
 	request_t *r = (request_t *)arg;
-	printf("app_test_delayed_finalize_request %p\n", r);
-	static const char hello[] = "Content-type: text/plain\r\n\r\nHello world\n";
-	request_write(r, hello, sizeof(hello)-1, 1);
-	request_end(r, 0, PROTOST_REQUEST_COMPLETE);
+	if (request_is_active(r)) {
+		printf("app_test_delayed_finalize_request %p\n", r);
+		static const char hello[] = "Content-type: text/plain\r\n\r\nHello world\n";
+		request_write(r, hello, sizeof(hello)-1, 1);
+		request_end(r, 0, PROTOST_REQUEST_COMPLETE);
+	}
 }
-
-
-#define DEBUG_RESPONSE_DELAY 5
-
-
-#ifndef DEBUG_RESPONSE_DELAY
-#define DEBUG_RESPONSE_DELAY 0
-#endif
 
 
 void app_handle_beginrequest(request_t *r) {
