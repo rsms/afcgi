@@ -653,20 +653,8 @@ ngx_http_fastcgi_handler(ngx_http_request_t *r)
 		flcf = ngx_http_get_module_loc_conf(r, ngx_http_fastcgi_module);
 		
 		u = r->upstream;
-		
-		/*
-		// create requests array
-		//if (u->input_filter_ctx == NULL) {
-			DLOG(r, "u => %p", u);
-			DLOG(r, "u->peer => %p", u->peer);
-			DLOG(r, "u->peer.data => %p", u->peer.data);
-			if (u->peer.data == NULL) {
-				u->peer.data = (void *)ngx_pcalloc(r->pool, 2);
-				// void *ngx_memcpy(void *dst, void *src, size_t n)
-				ngx_memcpy(u->peer.data, "x", 2);
-			}
-			//u->input_filter_ctx = (void *)1;
-		//}*/
+
+		/* todo: store requests[] map per upstream peer, not in location scope */
 
 		if (ngx_http_fastcgi_retain_request(r, f, flcf) == 0) {
 			ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
