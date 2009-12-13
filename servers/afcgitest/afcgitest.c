@@ -343,7 +343,7 @@ inline static void process_params(struct bufferevent *bev, uint16_t id, const ui
 	request_t *r;
 	
 	r = request_get(id);
-	assert(r->bev != NULL);
+	//assert(r->bev != NULL); // this can actually happen and it's ok
 	
 	// Is this the last message to come? Then queue the request for the user.
 	if (len == 0) {
